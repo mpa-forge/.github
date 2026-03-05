@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Architecture Decisions
+    url: https://github.com/mpa-forge/platform-blueprint-specs/tree/main/docs/adr
+    about: Review ADRs before opening implementation issues.
