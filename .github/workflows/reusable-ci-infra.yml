@@ -13,6 +13,26 @@ on:
         required: false
         type: string
         default: "1.14.5"
+      format-command:
+        description: Repository command used to enforce formatting checks.
+        required: false
+        type: string
+        default: "make repo-format-check"
+      lint-command:
+        description: Repository command used to enforce Terraform lint checks.
+        required: false
+        type: string
+        default: "make repo-lint"
+      validate-command:
+        description: Repository command used to validate Terraform modules and roots.
+        required: false
+        type: string
+        default: "make terraform-validate"
+      policy-command:
+        description: Repository command used to enforce repository policy checks.
+        required: false
+        type: string
+        default: "make repo-policy-check"
       toolchain-command:
         description: Baseline command used to prove the shared CI wiring is active.
         required: false
@@ -44,5 +64,70 @@ jobs:
 
       - name: Baseline note
         run: |
-          echo "P4-T01 starter baseline only."
-          echo "Later Phase 4 and Phase 5 tasks add fmt, validate, and IaC policy jobs."
+          echo "Phase 5 infrastructure CI now includes formatting, validation, lint, and policy jobs."
+
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run formatting checks
+        run: ${{ inputs.format-command }}
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Run lint checks
+        run: ${{ inputs.lint-command }}
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Run Terraform validate
+        run: ${{ inputs.validate-command }}
+
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run repository policy checks
+        run: ${{ inputs.policy-command }}

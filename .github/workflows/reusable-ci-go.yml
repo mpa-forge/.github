@@ -281,6 +281,8 @@ jobs:
       - lint
       - test
     if: inputs.image-build-enabled && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Callers that enable publish must grant the reusable-workflow call job
+    # matching `id-token: write`; reusable workflows cannot elevate it here.
     permissions:
       contents: read
       id-token: write
