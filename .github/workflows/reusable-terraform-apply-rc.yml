@@ -1,0 +1,232 @@
+name: reusable-terraform-apply-rc
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Repository path to run the workflow from.
+        required: false
+        type: string
+        default: "."
+      terraform-version:
+        description: Terraform version to install for the RC apply path.
+        required: false
+        type: string
+        default: "1.14.5"
+      root-directory:
+        description: Terraform root path for the RC environment.
+        required: false
+        type: string
+        default: "environments/rc"
+      lock-timeout:
+        description: Terraform state lock timeout to preserve repository conventions.
+        required: false
+        type: string
+        default: "5m"
+      github-environment:
+        description: GitHub Environment name that gates the apply job.
+        required: false
+        type: string
+        default: "rc-apply"
+      gcp-workload-identity-provider:
+        description: Workload Identity Provider resource used for RC Terraform auth.
+        required: true
+        type: string
+      gcp-service-account:
+        description: Service account email used for RC Terraform auth.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-apply-rc-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate workflow trigger context
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "The RC apply workflow can run only from refs/heads/main." >&2
+            exit 1
+          fi
+
+          if [[ "${{ inputs.root-directory }}" != "environments/rc" ]]; then
+            echo "The RC apply workflow is hard-locked to environments/rc." >&2
+            exit 1
+          fi
+
+          if [[ -z "${{ inputs.gcp-workload-identity-provider }}" ]]; then
+            echo "Missing gcp-workload-identity-provider input." >&2
+            exit 1
+          fi
+
+          if [[ -z "${{ inputs.gcp-service-account }}" ]]; then
+            echo "Missing gcp-service-account input." >&2
+            exit 1
+          fi
+
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Terraform init
+        run: terraform -chdir="${{ inputs.root-directory }}" init -input=false
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          set -euo pipefail
+          terraform -chdir="${{ inputs.root-directory }}" plan \
+            -input=false \
+            -lock-timeout="${{ inputs.lock-timeout }}" \
+            -out=terraform-rc.tfplan \
+            2>&1 | tee "${{ inputs.root-directory }}/terraform-rc-plan.log"
+
+      - name: Render Terraform plan
+        if: steps.plan.outcome == 'success'
+        run: terraform -chdir="${{ inputs.root-directory }}" show -no-color terraform-rc.tfplan > "${{ inputs.root-directory }}/terraform-rc-plan.txt"
+
+      - name: Publish plan summary
+        if: steps.plan.outcome == 'success'
+        shell: bash
+        run: |
+          {
+            echo "## RC Terraform plan"
+            echo
+            echo "Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "Commit: \`${GITHUB_SHA}\`"
+            echo "Root: \`${{ inputs.root-directory }}\`"
+            echo
+            echo '```text'
+            sed -n '1,200p' "${{ inputs.root-directory }}/terraform-rc-plan.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-rc-plan
+          path: |
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc.tfplan
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc-plan.txt
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc-plan.log
+          if-no-files-found: error
+
+  apply:
+    name: apply
+    runs-on: ubuntu-latest
+    needs:
+      - plan
+    environment: ${{ inputs.github-environment }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: terraform-rc-plan
+          path: ${{ inputs.working-directory }}/${{ inputs.root-directory }}
+
+      - name: Validate RC target before apply
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ inputs.root-directory }}" != "environments/rc" ]]; then
+            echo "The RC apply workflow is hard-locked to environments/rc." >&2
+            exit 1
+          fi
+
+          if [[ ! -f "${{ inputs.root-directory }}/terraform-rc.tfplan" ]]; then
+            echo "Expected Terraform plan artifact was not found." >&2
+            exit 1
+          fi
+
+      - name: Terraform init
+        run: terraform -chdir="${{ inputs.root-directory }}" init -input=false
+
+      - name: Terraform apply
+        id: apply
+        run: |
+          set -euo pipefail
+          terraform -chdir="${{ inputs.root-directory }}" apply \
+            -input=false \
+            -lock-timeout="${{ inputs.lock-timeout }}" \
+            terraform-rc.tfplan \
+            2>&1 | tee "${{ inputs.root-directory }}/terraform-rc-apply.log"
+
+      - name: Publish apply summary
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        run: |
+          {
+            echo "## RC Terraform apply"
+            echo
+            echo "Applied \`${{ inputs.root-directory }}\` from commit \`${GITHUB_SHA}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload apply artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-rc-apply
+          path: |
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc-apply.log
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc-plan.log
+            ${{ inputs.working-directory }}/${{ inputs.root-directory }}/terraform-rc-plan.txt
+          if-no-files-found: error
